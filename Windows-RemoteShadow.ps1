@@ -1,44 +1,49 @@
-﻿$baseDir = Split-Path $myinvocation.mycommand.path -Parent
+$baseDir = Split-Path $myinvocation.mycommand.path -Parent
 #https://github.com/Mentaleak/Show-LoadingScreen
 import-module (Join-Path -Path $baseDir -ChildPath "Show-LoadingScreen.ps1")
+$script:MachineFilter = "MachinePrefix-"
+#$script:AdminCreds =Get-Credential -Message "Enter admin Credentials"
 
-function get-ADSIComputers(){
-param(
-$LastlogonDays
-)
-    if($LastlogonDays){
-        $minLogonTime = $(((Get-Date).AddDays(-$LastlogonDays)).ToFileTime())
-        $filter="(&(objectCategory=computer)(lastlogontimestamp>=$($minLogonTime)))"
+function Get-ADSIComputers {
+    param (
+        $LastLogonDays,
+        [string]$FilterMachineName
+    )
+
+    if ($LastLogonDays) {
+        $minLogonTime = (Get-Date).AddDays(-$LastLogonDays).ToFileTime()
+        $filter = "(&(objectCategory=computer)(lastLogonTimeStamp>=$minLogonTime))"
+    } elseif ($FilterMachineName) {
+        $filter = "(&(objectCategory=computer)(name=$($FilterMachineName)*))"
+    } else {
+        $filter = "(objectCategory=computer)"
     }
-    else
-    {
-    $filter="(objectCategory=computer)"
+
+    $ls = Show-LoadingScreen -Note "AD Computers"
+    $forest = (Get-WmiObject win32_ComputerSystem).Domain.Split(".")
+    $domain = New-Object DirectoryServices.DirectoryEntry("LDAP://DC=$($forest[0]),DC=$($forest[1])")
+    $searchRoot = New-Object System.DirectoryServices.DirectoryEntry
+    $adSearcher = New-Object System.DirectoryServices.DirectorySearcher
+    $adSearcher.PageSize = 100000
+    $adSearcher.SearchRoot = $domain
+    $adSearcher.Filter = $filter
+    $adSearcher.PropertiesToLoad.Add("cn") | Out-Null
+    $adSearcher.PropertiesToLoad.Add("distinguishedname") | Out-Null
+    $adSearcher.PropertiesToLoad.Add("dnshostname") | Out-Null
+
+    $results = @()
+    $cnResult = $adSearcher.FindAll()
+    $ls.UpdateNote("Gathering OU")
+    $cnResult | ForEach-Object {
+        $OrgData = $_.Properties.distinguishedname.Split(',=') | Where-Object { $_ -ne "CN" -and $_ -ne "OU" -and $_ -ne "DC" }
+        $comp = New-Object PSObject -Property $_.Properties
+        $comp | Add-Member -MemberType NoteProperty -Name OU -Value $OrgData[($OrgData.Length - 3)]
+        $results += $comp
     }
-        $ls=show-LoadingScreen -note "AD Computers"
-            $forest=(Get-WmiObject win32_ComputerSystem).domain.split(".")
+    $ls.Close()
 
-            $domain = New-Object DirectoryServices.DirectoryEntry("LDAP://DC=$($forest[0]),DC=$($forest[1])")
-            $searchRoot = New-Object System.DirectoryServices.DirectoryEntry
-            $adSearcher = New-Object System.DirectoryServices.DirectorySearcher
-            $adSearcher.PageSize=100000
-            $adSearcher.SearchRoot = $domain
-            $adSearcher.Filter = $filter
-            $adSearcher.PropertiesToLoad.Add("cn") |Out-Null
-            $adSearcher.PropertiesToLoad.Add("distinguishedname") |Out-Null
-            $adSearcher.PropertiesToLoad.Add("dnshostname") |Out-Null
-
-            $results=@()
-            $cnResult = $adSearcher.FindAll()
-            $ls.updateNote("Gathering OU")
-                $cnResult |foreach{
-                    $OrgData=$_.Properties.distinguishedname.Split(',=') | Where-Object {$_ -ne "CN" -and $_ -ne "OU" -and  $_ -ne "DC"}
-                    $comp=new-object psobject -Property $_.Properties
-                    $comp |Add-Member -MemberType NoteProperty -Name OU -Value $OrgData[($OrgData.length-3)]
-                    $results+=$comp
-                }
-        $ls.close()
     return $results
-    }
+}
    
 function get-RemoteComputer(){
 param(
@@ -62,7 +67,7 @@ function get-RDPSession(){
     [Parameter(Mandatory=$true)]$fqdn
     )
     $ls=show-LoadingScreen -note "Sessions"
-    $sessions= Invoke-Command -ComputerName $fqdn -ScriptBlock { query session console } -credential $cred
+    $sessions= Invoke-Command -ComputerName $fqdn -ScriptBlock { query session console } 
     $sessions=$sessions[1..$sessions.Length]
     $sesionParse=@()
     $sessions|foreach{
@@ -103,28 +108,28 @@ function connect-rdpSession(){
 }
 
 
-function get-RDPSession(){
+function get-RDPSessions(){
     param(
     [Parameter(Mandatory=$true)]$fqdn
     )
-    $ls=show-LoadingScreen -note "Sessions"
-    $sessions= Invoke-Command -ComputerName $fqdn -ScriptBlock { query session } -credential $cred
+    $ls=show-LoadingScreen -note "$($fqdn.split(".")[0])"
+    $sessions= Invoke-Command -ComputerName $fqdn -ScriptBlock { query session }
     $sessions=$sessions[1..$sessions.Length]
     $sessionParse=@()
     foreach($session in $sessions){
         $ssp=$session.Split(" ")|where {$_ -ne ""}
         if($ssp.count -ge 4){
             $sessionParse+=[pscustomobject]@{
-            SessionName=$ssp[0]
+            #SessionName=$ssp[0]
             Username=$ssp[1]
             ID=$ssp[2]
             State=$ssp[3]
+            FQDN=$fqdn
             }
         }
     }
     $ls.close()
-    $selectedSession=$sessionParse|Out-GridView -OutputMode Single -Title "Select a Session"
-    return $selectedSession
+    return $sessionParse
 }
 
 function connect-rdpSession(){
@@ -183,6 +188,7 @@ $HostInput.width                 = 250
 $HostInput.height                = 20
 $HostInput.location              = New-Object System.Drawing.Point(5,35)
 $HostInput.Font                  = 'Microsoft Sans Serif,10'
+$hostInput.enabled               = $false
 
 $BtnBrowse                       = New-Object system.Windows.Forms.Button
 $BtnBrowse.text                  = "Browse"
@@ -199,6 +205,7 @@ $BtnConnect.height                = 30
 $BtnConnect.location              = New-Object System.Drawing.Point(275,50)
 $BtnConnect.Font                  = 'Microsoft Sans Serif,10'
 $BtnConnect.ForeColor             = "#ffffff"
+
 
 
 $CheckBoxControl                 = New-Object system.Windows.Forms.CheckBox
@@ -221,27 +228,30 @@ $CheckBoxnoConsent.Font          = 'Microsoft Sans Serif,10'
 $CheckBoxnoConsent.ForeColor     = "#ffffff"
 $CheckBoxnoConsent.Checked         = $true
 
-$form.controls.AddRange(@($Label1,$HostInput,$BtnBrowse,$BtnConnect, $CheckBoxControl,$CheckBoxnoConsent))
+#$Label1,$HostInput,
+$form.controls.AddRange(@($BtnBrowse, $HostInput ,$BtnConnect, $CheckBoxControl,$CheckBoxnoConsent))
 
 
 $BtnBrowse.Add_Click(
         {    
-            if(!$script:computers){
-                $script:computers=get-ADSIComputers
-            }
-                $computer=get-RemoteComputer -computers $computers
-                $HostInput.text=$computer.fqdn
+ 
+                $script:computers=get-ADSIComputers -FilterMachineName $script:MachineFilter
+                $sessions=@()
+                foreach($pcobj in $script:computers){
+                $sessions+=get-RDPSessions -fqdn $pcobj.dnshostname
+                }
+                $script:SelectedSession=$sessions|Out-GridView -OutputMode Single -Title "Select a Session"
+                $HostInput.Text =  $script:SelectedSession.Username
         }
     )
 
 
 $BtnConnect.Add_Click(
     {    
-        if($HostInput.Text){
-            $computername=$HostInput.Text
-            $selectedSession = get-RDPSession -fqdn $computername
-            if($selectedSession){
-                $sessionID = $selectedSession.ID
+        if($script:SelectedSession){
+            $computername=$script:SelectedSession.FQDN
+            if($script:SelectedSession){
+                $sessionID = $script:SelectedSession.ID
                 if($CheckBoxControl.Checked -and $CheckBoxnoConsent.Checked){
                     connect-rdpSession -fqdn $computername -sessionID $sessionID -control -noconsent
                 } elseif($CheckBoxControl.Checked){
